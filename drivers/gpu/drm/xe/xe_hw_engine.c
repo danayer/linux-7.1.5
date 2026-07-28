@@ -714,6 +714,17 @@ static void read_media_fuses(struct xe_gt *gt)
 			xe_gt_info(gt, "vecs%u fused off\n", j);
 		}
 	}
+	/* DIRTY HACK FOR DG2 QSV ENCODING */
+	/* Принудительно возвращаем vcs0 и vecs0 в маску, если это Arc DG2 */
+	if (xe->info.platform == XE_DG2) {
+		gt->info.engine_mask |= BIT(XE_HW_ENGINE_VCS0);
+		gt->info.engine_mask |= BIT(XE_HW_ENGINE_VECS0);
+		xe_gt_info(gt, "HACK: Forcing VCS0 and VECS0 on DG2!\n");
+
+		/* ПРЯМАЯ ЗАПИСЬ В ОБХОД GuC SAVE/RESTORE! */
+		xe_mmio_rmw32(&gt->mmio, XE_REG(0x1c3f10), 0, 0x00400000);
+		xe_gt_info(gt, "DIRECT HACK: Applied IECPUNIT_CLKGATE_DIS to VCS0 on DG2!\n");
+	}
 }
 
 static u32 infer_svccopy_from_meml3(struct xe_gt *gt)

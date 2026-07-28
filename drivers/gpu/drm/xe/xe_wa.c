@@ -133,13 +133,6 @@ __diag_ignore_all("-Woverride-init", "Allow field overrides in table");
 static const struct xe_rtp_entry_sr gt_was[] = {
 	/* Workarounds applying over a range of IPs */
 
-	{ XE_RTP_NAME("14011060649"),
-	  XE_RTP_RULES(MEDIA_VERSION_RANGE(1200, 1255),
-		       ENGINE_CLASS(VIDEO_DECODE),
-		       FUNC(xe_rtp_match_even_instance)),
-	  XE_RTP_ACTIONS(SET(VDBOX_CGCTL3F10(0), IECPUNIT_CLKGATE_DIS)),
-	  XE_RTP_ENTRY_FLAG(FOREACH_ENGINE),
-	},
 	{ XE_RTP_NAME("14011059788"),
 	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(1200, 1210)),
 	  XE_RTP_ACTIONS(SET(DFR_RATIO_EN_AND_CHICKEN, DFR_DISABLE))
@@ -182,6 +175,10 @@ static const struct xe_rtp_entry_sr gt_was[] = {
 	},
 
 	/* DG2 */
+	{ XE_RTP_NAME("14010648519"),
+	  XE_RTP_RULES(PLATFORM(DG2)),
+	  XE_RTP_ACTIONS(SET(XEHP_L3NODEARBCFG, XEHP_LNESPARE))
+	},
 
 	{ XE_RTP_NAME("22010523718"),
 	  XE_RTP_RULES(SUBPLATFORM(DG2, G10)),
