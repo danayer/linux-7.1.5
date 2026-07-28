@@ -496,56 +496,65 @@ static int parse_manifest_direct(struct xe_uc_fw *uc_fw, const void *data, size_
 
 static int parse_gsc_layout(struct xe_uc_fw *uc_fw, const void *data, size_t size)
 {
-    const struct xe_gsc_cpd_header_v2 *cpd = data;
-    const struct xe_gsc_cpd_entry *entry;
-    struct xe_uc_fw_version *release = &uc_fw->versions.found[XE_UC_FW_VER_RELEASE];
-    const u8 *entries;
-    int i;
-    
-    u32 manifest_offset = 0;
-    u32 payload_offset = 0;
-    u32 payload_size = 0;
+	const struct xe_gsc_cpd_header_v2 *cpd = data;
+	const struct xe_gsc_cpd_entry *entry;
+	struct xe_uc_fw_version *release = &uc_fw->versions.found[XE_UC_FW_VER_RELEASE];
+	const u8 *entries;
+	int i;
+	
+	u32 manifest_offset = 0;
+	u32 huc_fw_offset = 0;
 
-    if (size < sizeof(*cpd) || cpd->header_marker != XE_GSC_CPD_HEADER_MARKER) {
-        return -EPROTO;
-    }
+	if (size < sizeof(*cpd) || cpd->header_marker != XE_GSC_CPD_HEADER_MARKER)
+		return -EPROTO;
 
-    entries = (const u8 *)data + cpd->header_length;
+	entries = (const u8 *)data + cpd->header_length;
 
-    /* Ищем манифест и настоящую прошивку */
-    for (i = 0; i < cpd->num_of_entries; i++) {
-        entry = (const struct xe_gsc_cpd_entry *)(entries + i * sizeof(*entry));
-        
-        if (memcmp(entry->name, "HUCP.man", 8) == 0) {
-            manifest_offset = entry->offset & XE_GSC_CPD_ENTRY_OFFSET_MASK;
-        } 
-        else if (memcmp(entry->name, "huc_fw", 6) == 0 && entry->length > 100000) {
-            payload_offset = entry->offset & XE_GSC_CPD_ENTRY_OFFSET_MASK;
-            payload_size = entry->length;
-        }
-    }
+	for (i = 0; i < cpd->num_of_entries; i++) {
+		entry = (const struct xe_gsc_cpd_entry *)(entries + i * sizeof(*entry));
+		
+		if (strncmp(entry->name, "HUCP.man", 8) == 0) {
+			manifest_offset = entry->offset & XE_GSC_CPD_ENTRY_OFFSET_MASK;
+		} 
+		else if (strncmp(entry->name, "huc_fw", 6) == 0) {
+			huc_fw_offset = entry->offset & XE_GSC_CPD_ENTRY_OFFSET_MASK;
+		}
+	}
 
-    if (!manifest_offset || !payload_offset || !payload_size) {
-        printk(KERN_ERR "DG2 DEBUG: Missing manifest or payload!\n");
-        return -EPROTO;
-    }
+	if (!manifest_offset || !huc_fw_offset) {
+		printk(KERN_ERR "DG2 DEBUG: Missing HUCP.man or huc_fw in GSC container!\n");
+		return -ENODATA;
+	}
 
-    /* 
-     * ФИНАЛЬНАЯ МАТЕМАТИКА:
-     * Размер единого блока = (Конец секции кода) - (Начало манифеста)
-     */
-    uc_fw->css_offset = manifest_offset;
-    uc_fw->ucode_size = (payload_offset + payload_size) - manifest_offset;
+	if (manifest_offset < size) {
+		const struct xe_gsc_manifest_header *manifest = data + manifest_offset;
+		release->major = manifest->fw_version.major;
+		release->minor = manifest->fw_version.minor;
+		release->patch = manifest->fw_version.hotfix;
+	}
 
-    /* Врем кодекам про версию */
-    release->major = 7;
-    release->minor = 10;
-    release->patch = 3;
+	uc_fw->css_offset = huc_fw_offset;
 
-    printk(KERN_INFO "DG2 DEBUG: SUCCESS! Unified blob starts at %u, total size %u\n",
-           manifest_offset, uc_fw->ucode_size);
-           
-    return 0;
+	if (huc_fw_offset + sizeof(struct uc_css_header) < size) {
+		const struct uc_css_header *css = data + huc_fw_offset;
+		u32 calc_size = (css->size_dw - css->header_size_dw) * sizeof(u32);
+		
+		if (calc_size > 1000 && calc_size < size) {
+			uc_fw->ucode_size = calc_size;
+		} else {
+			uc_fw->ucode_size = size - huc_fw_offset;
+		}
+		uc_fw->rsa_size = css->rsa_info.key_size_dw * sizeof(u32);
+	} else {
+		uc_fw->ucode_size = size - huc_fw_offset;
+		uc_fw->rsa_size = 256;
+	}
+
+	printk(KERN_INFO "DG2 DEBUG: SUCCESS (GSC Fixed)! HuC v%u.%u.%u found. Offset: %u, Size: %u\n",
+	       release->major, release->minor, release->patch,
+	       uc_fw->css_offset, uc_fw->ucode_size);
+	       
+	return 0;
 }
 
 static int parse_headers(struct xe_uc_fw *uc_fw, const struct firmware *fw)

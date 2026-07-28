@@ -615,6 +615,24 @@ static int hw_engine_init(struct xe_gt *gt, struct xe_hw_engine *hwe,
 	xe_gt_assert(gt, gt->info.engine_mask & BIT(id));
 
 	xe_reg_sr_apply_mmio(&hwe->reg_sr, gt);
+	
+/* === BEGIN PATCH: Wa_14011060649 OUT-OF-BAND === */
+	if (xe->info.platform == XE_DG2 && 
+	    hwe->class == XE_ENGINE_CLASS_VIDEO_DECODE && 
+	    (hwe->instance % 2 == 0)) {
+		
+		xe_gt_info(gt, "Attempting to apply Wa_14011060649 to %s...\n", hwe->name);
+		
+		err = xe_force_wake_get(gt_to_fw(gt), hwe->domain);
+		if (err >= 0) { /* Положительный результат означает УСПЕХ (возвращается маска домена) */
+			xe_mmio_rmw32(&gt->mmio, XE_REG(hwe->mmio_base + 0x3f10), 0, 0x00400000);
+			xe_force_wake_put(gt_to_fw(gt), hwe->domain);
+			xe_gt_info(gt, "SUCCESS: Applied Wa_14011060649 to %s via direct MMIO!\n", hwe->name);
+		} else {
+			xe_gt_err(gt, "FAILED to get forcewake for %s (err=%d)\n", hwe->name, err);
+		}
+	}
+	/* === END PATCH === */
 
 	hwe->hwsp = xe_managed_bo_create_pin_map(xe, tile, SZ_4K,
 						 XE_BO_FLAG_VRAM_IF_DGFX(tile) |
@@ -713,17 +731,6 @@ static void read_media_fuses(struct xe_gt *gt)
 			gt->info.engine_mask &= ~BIT(i);
 			xe_gt_info(gt, "vecs%u fused off\n", j);
 		}
-	}
-	/* DIRTY HACK FOR DG2 QSV ENCODING */
-	/* Принудительно возвращаем vcs0 и vecs0 в маску, если это Arc DG2 */
-	if (xe->info.platform == XE_DG2) {
-		gt->info.engine_mask |= BIT(XE_HW_ENGINE_VCS0);
-		gt->info.engine_mask |= BIT(XE_HW_ENGINE_VECS0);
-		xe_gt_info(gt, "HACK: Forcing VCS0 and VECS0 on DG2!\n");
-
-		/* ПРЯМАЯ ЗАПИСЬ В ОБХОД GuC SAVE/RESTORE! */
-		xe_mmio_rmw32(&gt->mmio, XE_REG(0x1c3f10), 0, 0x00400000);
-		xe_gt_info(gt, "DIRECT HACK: Applied IECPUNIT_CLKGATE_DIS to VCS0 on DG2!\n");
 	}
 }
 
