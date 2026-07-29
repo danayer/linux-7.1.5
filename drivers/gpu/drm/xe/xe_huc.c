@@ -91,7 +91,7 @@ static void xe_huc_auth_work(struct work_struct *work)
 	}
 
 	if (ret == -ENODEV || ret == -EAGAIN) {
-		schedule_delayed_work(&huc->auth_work, msecs_to_jiffies(1000));
+		schedule_delayed_work(&huc->auth_work, msecs_to_jiffies(5000));
 		return;
 	}
 
@@ -336,7 +336,7 @@ int xe_huc_auth(struct xe_huc *huc, enum xe_huc_auth_types type)
 	}
 
 	ret = xe_mmio_wait32(&gt->mmio, huc_auth_modes[type].reg, huc_auth_modes[type].val,
-			     huc_auth_modes[type].val, 100000, NULL, false);
+			     huc_auth_modes[type].val, 500000, NULL, false);
 	if (ret) {
 		xe_gt_err(gt, "HuC: firmware not verified: %pe\n", ERR_PTR(ret));
 		goto fail;
