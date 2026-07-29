@@ -35,7 +35,6 @@
 #include "xe_step.h"
 #include "xe_survivability_mode.h"
 #include "xe_tile.h"
-#include "xe_mei_dg2.h"
 
 enum toggle_d3cold {
 	D3COLD_DISABLE,
@@ -1159,17 +1158,6 @@ static int xe_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	ret = xe_pm_init(xe);
 	if (ret)
 		goto err_driver_cleanup;
-
-	/* 
-	 * Integration of MEI GSC Bridge for DG2.
-	 * This is called at the very end of probe to ensure all memory 
-	 * subsystems (VRAM/TTM) are fully initialized.
-	 */
-	ret = xe_mei_dg2_init(xe);
-	if (ret) {
-		xe_err(xe, "Failed to initialize MEI GSC bridge: %d\n", ret);
-		/* We don't fail probe here as GSC is not critical for basic boot */
-	}
 
 	drm_dbg(&xe->drm, "d3cold: capable=%s\n",
 		str_yes_no(xe->d3cold.capable));

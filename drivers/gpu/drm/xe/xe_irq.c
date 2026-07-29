@@ -317,14 +317,6 @@ gt_other_irq_handler(struct xe_gt *gt, const u8 instance, const u16 iir)
 	if (instance == OTHER_GSC_HECI2_INSTANCE && xe_gt_is_media_type(gt))
 		return xe_gsc_proxy_irq_handler(&gt->uc.gsc, iir);
 
-	/* DG2 MEI GSC Bridge IRQ routing */
-	if (gt_to_xe(gt)->info.platform == XE_DG2 && instance == OTHER_GSC_INSTANCE) {
-		struct xe_device *xe = gt_to_xe(gt);
-		if (xe->mei_dg2 && xe->mei_dg2->irq >= 0)
-			generic_handle_irq(xe->mei_dg2->irq);
-		return;
-	}
-
 	if (instance != OTHER_GUC_INSTANCE &&
 	    instance != OTHER_MEDIA_GUC_INSTANCE) {
 		WARN_ONCE(1, "unhandled other interrupt instance=0x%x, iir=0x%x\n",

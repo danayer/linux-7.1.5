@@ -73,12 +73,13 @@ static void xe_huc_auth_work(struct work_struct *work)
 
 	if (ret == 0) {
 		if (xe->info.platform == XE_DG2) {
-			ret = xe_mmio_wait32(&gt->mmio, huc_auth_modes[XE_HUC_AUTH_VIA_GSC].reg,
-					     huc_auth_modes[XE_HUC_AUTH_VIA_GSC].val,
-					     huc_auth_modes[XE_HUC_AUTH_VIA_GSC].val,
+			/* Для DG2 мы ДОЛЖНЫ проверять регистр GuC, а не GSC (HECI) */
+			ret = xe_mmio_wait32(&gt->mmio, huc_auth_modes[XE_HUC_AUTH_VIA_GUC].reg,
+					     huc_auth_modes[XE_HUC_AUTH_VIA_GUC].val,
+					     huc_auth_modes[XE_HUC_AUTH_VIA_GUC].val,
 					     100000, NULL, false);
 			if (ret) {
-				xe_gt_err(gt, "HuC: delayed MEI verification failed: %pe\n", ERR_PTR(ret));
+				drm_err(&xe->drm, "HuC: delayed MEI verification failed: %pe\n", ERR_PTR(ret));
 				goto fail;
 			}
 		}
@@ -86,17 +87,17 @@ static void xe_huc_auth_work(struct work_struct *work)
 		xe_pm_runtime_get(xe);
 		xe_uc_fw_change_status(&huc->fw, XE_UC_FIRMWARE_RUNNING);
 		xe_pm_runtime_put(xe);
-		xe_info(xe, "HuC: delayed authentication successful!\n");
+		drm_info(&xe->drm, "HuC: delayed authentication successful!\n");
 		return;
 	}
 
 	if (ret == -ENODEV || ret == -EAGAIN) {
-		schedule_delayed_work(&huc->auth_work, msecs_to_jiffies(5000));
+		schedule_delayed_work(&huc->auth_work, msecs_to_jiffies(1000));
 		return;
 	}
 
 fail:
-	xe_gt_err(gt, "HuC: Deferred authentication failed with error: %d\n", ret);
+	drm_err(&xe->drm, "HuC: Deferred authentication failed with error: %d\n", ret);
 	xe_uc_fw_change_status(&huc->fw, XE_UC_FIRMWARE_LOAD_FAIL);
 }
 
@@ -288,31 +289,30 @@ int xe_huc_auth(struct xe_huc *huc, enum xe_huc_auth_types type)
 	if (!xe_uc_fw_is_loaded(&huc->fw))
 		return -ENOEXEC;
 
-	/* ЖЕСТКИЙ ПЕРЕХВАТ ДЛЯ DG2: Игнорируем запрашиваемый тип, идем через MEI */
 	if (xe->info.platform == XE_DG2) {
 		ret = xe_mei_dg2_auth_huc(xe, huc);
 		if (ret) {
 			if (ret == -ENODEV || ret == -EAGAIN) {
-				xe_info(xe, "HuC: MEI bridge not ready, deferring authentication\n");
+				drm_info(&xe->drm, "HuC: MEI bridge not ready, deferring authentication\n");
 				schedule_delayed_work(&huc->auth_work, msecs_to_jiffies(1000));
 				return 0;
 			}
-			xe_gt_err(gt, "HuC: failed to trigger auth via MEI: %pe\n", ERR_PTR(ret));
+			drm_err(&xe->drm, "HuC: failed to trigger auth via MEI: %pe\n", ERR_PTR(ret));
 			goto fail;
 		}
 		
-		/* Ждем подтверждения аппаратуры, что статус изменился на RUNNING */
-		ret = xe_mmio_wait32(&gt->mmio, huc_auth_modes[XE_HUC_AUTH_VIA_GSC].reg,
-				     huc_auth_modes[XE_HUC_AUTH_VIA_GSC].val,
-				     huc_auth_modes[XE_HUC_AUTH_VIA_GSC].val,
+		/* Снова ждем правильный регистр для DG2 */
+		ret = xe_mmio_wait32(&gt->mmio, huc_auth_modes[XE_HUC_AUTH_VIA_GUC].reg,
+				     huc_auth_modes[XE_HUC_AUTH_VIA_GUC].val,
+				     huc_auth_modes[XE_HUC_AUTH_VIA_GUC].val,
 				     100000, NULL, false);
 		if (ret) {
-			xe_gt_err(gt, "HuC: firmware not verified by MEI: %pe\n", ERR_PTR(ret));
+			drm_err(&xe->drm, "HuC: firmware not verified by MEI: %pe\n", ERR_PTR(ret));
 			goto fail;
 		}
 
 		xe_uc_fw_change_status(&huc->fw, XE_UC_FIRMWARE_RUNNING);
-		xe_info(xe, "HuC: authenticated successfully via MEI GSC Bridge!\n");
+		drm_info(&xe->drm, "HuC: authenticated successfully via MEI GSC Bridge!\n");
 		return 0;
 	}
 
@@ -336,7 +336,7 @@ int xe_huc_auth(struct xe_huc *huc, enum xe_huc_auth_types type)
 	}
 
 	ret = xe_mmio_wait32(&gt->mmio, huc_auth_modes[type].reg, huc_auth_modes[type].val,
-			     huc_auth_modes[type].val, 500000, NULL, false);
+			     huc_auth_modes[type].val, 100000, NULL, false);
 	if (ret) {
 		xe_gt_err(gt, "HuC: firmware not verified: %pe\n", ERR_PTR(ret));
 		goto fail;
