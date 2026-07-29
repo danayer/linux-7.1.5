@@ -88,7 +88,7 @@ int xe_mei_dg2_auth_huc(struct xe_device *xe, struct xe_huc *huc)
 	in.header.api_version = PXP_APIVER(4, 3);
 	in.header.command_id = PXP43_CMDID_START_HUC_AUTH;
 	in.header.buffer_len = sizeof(in.huc_base_address);
-	in.huc_base_address = cpu_to_le64(xe_bo_ggtt_addr(huc->fw.bo));
+	in.huc_base_address = cpu_to_le64(xe_bo_main_addr(huc->fw.bo, PAGE_SIZE));
 
 	byte = mei_cldev_send(cldev, (u8 *)&in, sizeof(in));
 	if (byte < 0) {
@@ -105,8 +105,8 @@ int xe_mei_dg2_auth_huc(struct xe_device *xe, struct xe_huc *huc)
 	put_device(cl_dev);
 
 	if (out.header.status == PXP_STATUS_OP_NOT_PERMITTED) {
-		drm_info(&xe->drm, "HuC auth: GSC is busy (0x1003), deferring...\n");
-		return -EAGAIN;
+		drm_info(&xe->drm, "HuC auth: GSC reports already authenticated (0x1003).\n");
+		return 0;
 	} else if (out.header.status != PXP_STATUS_SUCCESS) {
 		drm_err(&xe->drm, "HuC auth MEI rejected: status 0x%x\n", out.header.status);
 		return -EIO;

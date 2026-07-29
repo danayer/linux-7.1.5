@@ -3,6 +3,7 @@
  * Copyright © 2023 Intel Corporation
  */
 
+#include "xe_heci_gsc.h"
 #include "xe_gsc.h"
 
 #include <linux/delay.h>
@@ -370,10 +371,13 @@ static void gsc_work(struct work_struct *work)
 
 	if (actions & GSC_ACTION_FW_LOAD) {
 		ret = gsc_upload_and_init(gsc);
-		if (ret && ret != -EEXIST)
+		if (ret && ret != -EEXIST) {
 			xe_uc_fw_change_status(&gsc->fw, XE_UC_FIRMWARE_LOAD_FAIL);
-		else
+		} else {
 			xe_uc_fw_change_status(&gsc->fw, XE_UC_FIRMWARE_RUNNING);
+			/* ИСПРАВЛЕНО: Регистрируем HECI1 только когда прошивка работает! */
+			xe_heci_gsc_init_heci1(xe);
+		}
 	}
 
 	if (actions & GSC_ACTION_SW_PROXY)

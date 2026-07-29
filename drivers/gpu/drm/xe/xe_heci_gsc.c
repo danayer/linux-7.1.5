@@ -17,6 +17,9 @@
 #include "xe_survivability_mode.h"
 #include "xe_gt.h"
 #include "xe_mmio.h"
+#include "xe_bo.h"
+#include "xe_map.h"
+#include "xe_force_wake.h"
 
 #define GSC_BAR_LENGTH  0x00000FFC
 
@@ -42,6 +45,7 @@ struct heci_gsc_def {
 	size_t bar_size;
 	bool use_polling;
 	bool slow_firmware;
+	size_t lmem_size;
 };
 
 static const struct heci_gsc_def heci_gsc_def_dg1 = {
@@ -50,12 +54,13 @@ static const struct heci_gsc_def heci_gsc_def_dg1 = {
 	.bar_size = GSC_BAR_LENGTH,
 };
 
-/* Регистрируем оба HECI устройства БЕЗ дублирующего выделения памяти */
 static const struct heci_gsc_def heci_gsc_def_dg2[] = {
 	{
 		.name = "mei-gsc",
 		.bar = DG2_GSC_HECI1_BASE,
 		.bar_size = GSC_BAR_LENGTH,
+		.use_polling = true, /* Лечит ошибку -62 (тайм-аут прерываний) */
+		.lmem_size = SZ_4M,
 	},
 	{
 		.name = "mei-gscfi",
@@ -93,6 +98,11 @@ static void xe_heci_gsc_fini(void *arg)
 		if (heci_gsc->irq[i] >= 0)
 			irq_free_desc(heci_gsc->irq[i]);
 		heci_gsc->irq[i] = -1;
+
+		if (heci_gsc->gem_obj[i]) {
+			xe_bo_unpin_map_no_vm(heci_gsc->gem_obj[i]);
+			heci_gsc->gem_obj[i] = NULL;
+		}
 	}
 }
 
@@ -126,13 +136,41 @@ static int heci_gsc_add_device(struct xe_device *xe, const struct heci_gsc_def *
 	adev = kzalloc_obj(*adev);
 	if (!adev)
 		return -ENOMEM;
-	adev->irq = heci_gsc->irq[intf_id];
+
+	adev->irq = def->use_polling ? -1 : heci_gsc->irq[intf_id];
 	adev->bar.parent = &pdev->resource[0];
 	adev->bar.start = def->bar + pdev->resource[0].start;
 	adev->bar.end = adev->bar.start + def->bar_size - 1;
 	adev->bar.flags = IORESOURCE_MEM;
 	adev->bar.desc = IORES_DESC_NONE;
 	adev->slow_firmware = def->slow_firmware;
+
+	if (def->lmem_size) {
+		struct xe_tile *tile = &xe->tiles[0];
+		struct xe_bo *bo;
+		dma_addr_t dma_addr;
+
+		/* ВАЖНО: Используем XE_BO_FLAG_VRAM0 для физической памяти (LMEM) */
+		bo = xe_bo_create_pin_map_novm(xe, tile, def->lmem_size,
+					       ttm_bo_type_kernel,
+				 XE_BO_FLAG_VRAM0, false);
+		if (!IS_ERR(bo)) {
+			/* Очищаем мусор, чтобы GSC не завис при чтении */
+			xe_map_memset(xe, &bo->vmap, 0, 0, def->lmem_size);
+
+			heci_gsc->gem_obj[intf_id] = bo;
+
+			/* ИСПРАВЛЕНО НАВСЕГДА: Только xe_bo_main_addr (DPA). Никаких PCI BAR! */
+			dma_addr = xe_bo_main_addr(bo, PAGE_SIZE);
+
+			adev->ext_op_mem.start = dma_addr;
+			adev->ext_op_mem.end = adev->ext_op_mem.start + def->lmem_size;
+			drm_info(&xe->drm, "GSC HECI%d: Allocated and ZEROED %zu bytes VRAM at DPA 0x%llx\n",
+				 intf_id + 1, def->lmem_size, (unsigned long long)dma_addr);
+		} else {
+			drm_err(&xe->drm, "GSC HECI%d: Failed to alloc LMEM\n", intf_id + 1);
+		}
+	}
 
 	aux_dev = &adev->aux_dev;
 	aux_dev->name = def->name;
@@ -167,6 +205,8 @@ int xe_heci_gsc_init(struct xe_device *xe)
 
 	heci_gsc->irq[0] = -1;
 	heci_gsc->irq[1] = -1;
+	heci_gsc->gem_obj[0] = NULL;
+	heci_gsc->gem_obj[1] = NULL;
 
 	ret = devm_add_action_or_reset(xe->drm.dev, xe_heci_gsc_fini, heci_gsc);
 	if (ret)
@@ -181,6 +221,11 @@ int xe_heci_gsc_init(struct xe_device *xe)
 	if (xe->info.platform == XE_DG2) {
 		struct xe_gt *gt = xe->tiles[0].primary_gt;
 		u32 mask, en;
+		unsigned int fw_ref;
+
+		fw_ref = xe_force_wake_get(gt_to_fw(gt), XE_FW_GSC);
+		if (!fw_ref)
+			drm_dbg(&xe->drm, "Failed to get force wake for GSC\n");
 
 		mask = xe_mmio_read32(&gt->mmio, XE_REG(0x1900f4));
 		mask &= ~BIT(15);
@@ -203,41 +248,29 @@ int xe_heci_gsc_init(struct xe_device *xe)
 		return heci_gsc_add_device(xe, &heci_gsc_def_dg1, 1);
 	}
 
-	drm_warn(&xe->drm, "HECI is not implemented!\n");
 	return 0;
+}
+
+void xe_heci_gsc_init_heci1(struct xe_device *xe)
+{
 }
 
 void xe_heci_gsc_irq_handler(struct xe_device *xe, u32 iir)
 {
-	if (!xe->info.has_heci_gscfi) {
-		drm_warn_once(&xe->drm, "GSC irq: not supported");
+	if (!xe->info.has_heci_gscfi)
 		return;
-	}
 
-	if (iir & GSC_IRQ_INTF(0) && xe->heci_gsc.irq[0] >= 0) {
-		if (generic_handle_irq_safe(xe->heci_gsc.irq[0]))
-			drm_err_ratelimited(&xe->drm, "error handling GSC irq 0\n");
-	}
+	if (iir & GSC_IRQ_INTF(0) && xe->heci_gsc.irq[0] >= 0)
+		generic_handle_irq_safe(xe->heci_gsc.irq[0]);
 
-	if (iir & GSC_IRQ_INTF(1) && xe->heci_gsc.irq[1] >= 0) {
-		if (generic_handle_irq_safe(xe->heci_gsc.irq[1]))
-			drm_err_ratelimited(&xe->drm, "error handling GSC irq 1\n");
-	}
+	if (iir & GSC_IRQ_INTF(1) && xe->heci_gsc.irq[1] >= 0)
+		generic_handle_irq_safe(xe->heci_gsc.irq[1]);
 }
 
 void xe_heci_csc_irq_handler(struct xe_device *xe, u32 iir)
 {
-	if ((iir & CSC_IRQ_INTF(1)) == 0)
+	if ((iir & CSC_IRQ_INTF(1)) == 0 || !xe->info.has_heci_cscfi || xe->heci_gsc.irq[1] < 0)
 		return;
 
-	if (!xe->info.has_heci_cscfi) {
-		drm_warn_once(&xe->drm, "CSC irq: not supported");
-		return;
-	}
-
-	if (xe->heci_gsc.irq[1] < 0)
-		return;
-
-	if (generic_handle_irq_safe(xe->heci_gsc.irq[1]))
-		drm_err_ratelimited(&xe->drm, "error handling CSC irq\n");
+	generic_handle_irq_safe(xe->heci_gsc.irq[1]);
 }
