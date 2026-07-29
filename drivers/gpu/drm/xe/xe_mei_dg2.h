@@ -14,6 +14,7 @@ struct xe_mei_dg2 {
 	struct xe_gt *gt;
 	struct mei_aux_device *adev[2];
 	struct xe_bo *lmem_bo;
+	int irq; /* Виртуальное прерывание для маршрутизации */
 };
 
 int xe_mei_dg2_init(struct xe_device *xe);

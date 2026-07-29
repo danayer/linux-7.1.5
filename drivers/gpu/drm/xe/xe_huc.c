@@ -23,8 +23,8 @@
 #include "xe_mmio.h"
 #include "xe_sriov.h"
 #include "xe_uc_fw.h"
-#include "xe_mei_dg2.h"
 #include "xe_pm.h"
+#include "xe_mei_dg2.h"
 
 static struct xe_gt *
 huc_to_gt(struct xe_huc *huc)
@@ -44,6 +44,21 @@ huc_to_guc(struct xe_huc *huc)
 	return &container_of(huc, struct xe_uc, huc)->guc;
 }
 
+static int huc_auth_via_gsccs(struct xe_huc *huc);
+
+static const struct {
+	const char *name;
+	struct xe_reg reg;
+	u32 val;
+} huc_auth_modes[XE_HUC_AUTH_TYPES_COUNT] = {
+	[XE_HUC_AUTH_VIA_GUC] = { "GuC",
+				  HUC_KERNEL_LOAD_INFO,
+				  HUC_LOAD_SUCCESSFUL },
+	[XE_HUC_AUTH_VIA_GSC] = { "GSC",
+				  HECI_FWSTS5(MTL_GSC_HECI1_BASE),
+				  HECI1_FWSTS5_HUC_AUTH_DONE },
+};
+
 static void xe_huc_auth_work(struct work_struct *work)
 {
 	struct xe_huc *huc = container_of(work, struct xe_huc, auth_work.work);
@@ -51,30 +66,37 @@ static void xe_huc_auth_work(struct work_struct *work)
 	struct xe_device *xe = gt_to_xe(gt);
 	int ret;
 
-	xe_info(xe, "HuC: Attempting deferred authentication via MEI GSC bridge\n");
+	if (xe->info.platform == XE_DG2)
+		ret = xe_mei_dg2_auth_huc(xe, huc);
+	else
+		ret = huc_auth_via_gsccs(huc);
 
-	ret = xe_mei_dg2_auth_huc(xe, huc);
 	if (ret == 0) {
-		xe_info(xe, "HuC: Deferred authentication successful\n");
+		if (xe->info.platform == XE_DG2) {
+			ret = xe_mmio_wait32(&gt->mmio, huc_auth_modes[XE_HUC_AUTH_VIA_GSC].reg,
+					     huc_auth_modes[XE_HUC_AUTH_VIA_GSC].val,
+					     huc_auth_modes[XE_HUC_AUTH_VIA_GSC].val,
+					     100000, NULL, false);
+			if (ret) {
+				xe_gt_err(gt, "HuC: delayed MEI verification failed: %pe\n", ERR_PTR(ret));
+				goto fail;
+			}
+		}
 
-		/*
-		 * After GSC handles authentication and automatically informs GuC.
-		 * We just need to update the software state.
-		 */
 		xe_pm_runtime_get(xe);
 		xe_uc_fw_change_status(&huc->fw, XE_UC_FIRMWARE_RUNNING);
 		xe_pm_runtime_put(xe);
-
+		xe_info(xe, "HuC: delayed authentication successful!\n");
 		return;
 	}
 
 	if (ret == -ENODEV || ret == -EAGAIN) {
-		xe_warn(xe, "HuC: MEI GSC bridge still not ready, rescheduling in 1s...\n");
 		schedule_delayed_work(&huc->auth_work, msecs_to_jiffies(1000));
 		return;
 	}
 
-	xe_err(xe, "HuC: Deferred authentication failed with error: %d\n", ret);
+fail:
+	xe_gt_err(gt, "HuC: Deferred authentication failed with error: %d\n", ret);
 	xe_uc_fw_change_status(&huc->fw, XE_UC_FIRMWARE_LOAD_FAIL);
 }
 
@@ -85,7 +107,6 @@ static int huc_alloc_gsc_pkt(struct xe_huc *huc)
 	struct xe_device *xe = gt_to_xe(gt);
 	struct xe_bo *bo;
 
-	/* we use a single object for both input and output */
 	bo = xe_managed_bo_create_pin_map(xe, gt_to_tile(gt),
 					  PXP43_HUC_AUTH_INOUT_SIZE * 2,
 					  XE_BO_FLAG_SYSTEM |
@@ -108,12 +129,6 @@ int xe_huc_init(struct xe_huc *huc)
 
 	huc->fw.type = XE_UC_FW_TYPE_HUC;
 
-	/*
-	 * The HuC is only available on the media GT on most platforms.  The
-	 * exception to that rule are the old Xe1 platforms where there was
-	 * no separate GT for media IP, so the HuC was part of the primary
-	 * GT.  Such platforms have graphics versions 12.55 and earlier.
-	 */
 	if (!xe_gt_is_media_type(gt) && GRAPHICS_VERx100(xe) > 1255) {
 		xe_uc_fw_change_status(&huc->fw, XE_UC_FIRMWARE_NOT_SUPPORTED);
 		return 0;
@@ -239,11 +254,6 @@ static int huc_auth_via_gsccs(struct xe_huc *huc)
 		return err;
 	}
 
-	/*
-	 * The GSC will return PXP_STATUS_OP_NOT_PERMITTED if the HuC is already
-	 * authenticated. If the same error is ever returned with HuC not loaded
-	 * we'll still catch it when we check the authentication bit later.
-	 */
 	out_status = huc_auth_msg_rd(xe, &pkt->vmap, rd_offset, header.status);
 	if (out_status != PXP_STATUS_SUCCESS && out_status != PXP_STATUS_OP_NOT_PERMITTED) {
 		xe_gt_err(gt, "HuC: authentication failed with GSC error = %#x\n", out_status);
@@ -252,19 +262,6 @@ static int huc_auth_via_gsccs(struct xe_huc *huc)
 
 	return 0;
 }
-
-static const struct {
-	const char *name;
-	struct xe_reg reg;
-	u32 val;
-} huc_auth_modes[XE_HUC_AUTH_TYPES_COUNT] = {
-	[XE_HUC_AUTH_VIA_GUC] = { "GuC",
-				  HUC_KERNEL_LOAD_INFO,
-				  HUC_LOAD_SUCCESSFUL },
-	[XE_HUC_AUTH_VIA_GSC] = { "GSC",
-				  HECI_FWSTS5(MTL_GSC_HECI1_BASE),
-				  HECI1_FWSTS5_HUC_AUTH_DONE },
-};
 
 bool xe_huc_is_authenticated(struct xe_huc *huc, enum xe_huc_auth_types type)
 {
@@ -283,7 +280,6 @@ int xe_huc_auth(struct xe_huc *huc, enum xe_huc_auth_types type)
 	if (!xe_uc_fw_is_loadable(&huc->fw))
 		return 0;
 
-	/* On newer platforms the HuC survives reset, so no need to re-auth */
 	if (xe_huc_is_authenticated(huc, type)) {
 		xe_uc_fw_change_status(&huc->fw, XE_UC_FIRMWARE_RUNNING);
 		return 0;
@@ -292,32 +288,48 @@ int xe_huc_auth(struct xe_huc *huc, enum xe_huc_auth_types type)
 	if (!xe_uc_fw_is_loaded(&huc->fw))
 		return -ENOEXEC;
 
+	/* ЖЕСТКИЙ ПЕРЕХВАТ ДЛЯ DG2: Игнорируем запрашиваемый тип, идем через MEI */
+	if (xe->info.platform == XE_DG2) {
+		ret = xe_mei_dg2_auth_huc(xe, huc);
+		if (ret) {
+			if (ret == -ENODEV || ret == -EAGAIN) {
+				xe_info(xe, "HuC: MEI bridge not ready, deferring authentication\n");
+				schedule_delayed_work(&huc->auth_work, msecs_to_jiffies(1000));
+				return 0;
+			}
+			xe_gt_err(gt, "HuC: failed to trigger auth via MEI: %pe\n", ERR_PTR(ret));
+			goto fail;
+		}
+		
+		/* Ждем подтверждения аппаратуры, что статус изменился на RUNNING */
+		ret = xe_mmio_wait32(&gt->mmio, huc_auth_modes[XE_HUC_AUTH_VIA_GSC].reg,
+				     huc_auth_modes[XE_HUC_AUTH_VIA_GSC].val,
+				     huc_auth_modes[XE_HUC_AUTH_VIA_GSC].val,
+				     100000, NULL, false);
+		if (ret) {
+			xe_gt_err(gt, "HuC: firmware not verified by MEI: %pe\n", ERR_PTR(ret));
+			goto fail;
+		}
+
+		xe_uc_fw_change_status(&huc->fw, XE_UC_FIRMWARE_RUNNING);
+		xe_info(xe, "HuC: authenticated successfully via MEI GSC Bridge!\n");
+		return 0;
+	}
+
 	switch (type) {
 	case XE_HUC_AUTH_VIA_GUC:
-		if (xe->info.platform == XE_DG2) {
-			/* DG2 requires GSC auth via MEI, bypass GuC H2G */
-			return xe_huc_auth(huc, XE_HUC_AUTH_VIA_GSC);
-		}
 		ret = xe_guc_auth_huc(guc, xe_bo_ggtt_addr(huc->fw.bo) +
 				      xe_uc_fw_rsa_offset(&huc->fw));
 		break;
 	case XE_HUC_AUTH_VIA_GSC:
-		if (xe->info.platform == XE_DG2) {
-			ret = xe_mei_dg2_auth_huc(xe, huc);
-		} else {
-			ret = huc_auth_via_gsccs(huc);
-		}
+		ret = huc_auth_via_gsccs(huc);
 		break;
 	default:
 		XE_WARN_ON(type);
 		return -EINVAL;
 	}
+
 	if (ret) {
-		if (xe->info.platform == XE_DG2 && (ret == -ENODEV || ret == -EAGAIN)) {
-			xe_info(xe, "HuC: MEI GSC bridge not ready, deferring authentication\n");
-			schedule_delayed_work(&huc->auth_work, msecs_to_jiffies(1000));
-			return 0;
-		}
 		xe_gt_err(gt, "HuC: failed to trigger auth via %s: %pe\n",
 			  huc_auth_modes[type].name, ERR_PTR(ret));
 		goto fail;
@@ -336,8 +348,7 @@ int xe_huc_auth(struct xe_huc *huc, enum xe_huc_auth_types type)
 	return 0;
 
 fail:
-	xe_gt_err(gt, "HuC: authentication via %s failed: %pe\n",
-		  huc_auth_modes[type].name, ERR_PTR(ret));
+	xe_gt_err(gt, "HuC: authentication failed: %pe\n", ERR_PTR(ret));
 	xe_uc_fw_change_status(&huc->fw, XE_UC_FIRMWARE_LOAD_FAIL);
 
 	return ret;

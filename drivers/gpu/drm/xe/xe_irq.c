@@ -3,6 +3,7 @@
  * Copyright © 2021 Intel Corporation
  */
 
+#include <linux/irq.h>
 #include "xe_irq.h"
 
 #include <linux/sched/clock.h>
@@ -318,12 +319,10 @@ gt_other_irq_handler(struct xe_gt *gt, const u8 instance, const u16 iir)
 
 	/* DG2 MEI GSC Bridge IRQ routing */
 	if (gt_to_xe(gt)->info.platform == XE_DG2 && instance == OTHER_GSC_INSTANCE) {
-		/* 
-		 * For DG2, we route the interrupt to the MEI subsystem.
-		 * In a real implementation, we would call generic_handle_irq() 
-		 * using the IRQ number assigned to the mei_aux_device.
-		 */
-		return; 
+		struct xe_device *xe = gt_to_xe(gt);
+		if (xe->mei_dg2 && xe->mei_dg2->irq >= 0)
+			generic_handle_irq(xe->mei_dg2->irq);
+		return;
 	}
 
 	if (instance != OTHER_GUC_INSTANCE &&
